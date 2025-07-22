@@ -2,6 +2,12 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from sklearn.base import BaseEstimator, TransformerMixin
+from typing import List, Dict, Optional, Union, Any, Tuple
+import logging
+from functools import reduce
+
+# Import RFM target engineering
+from src.target_engineering import RFMTargetEngineer, create_proxy_target
 from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.preprocessing import (
     StandardScaler,
@@ -679,14 +685,16 @@ def preprocess_data(
     df: pd.DataFrame,
     numerical_cols: List[str],
     categorical_cols: List[str],
-    target_col: Optional[str] = 'FraudResult',
+    target_col: Optional[str] = None,  # Make target_col optional
     customer_id_col: str = 'CustomerId',
     date_col: str = 'TransactionStartTime',
     amount_col: str = 'Amount',
     merchant_col: str = 'ProviderId',
     test_size: float = 0.2,
     random_state: int = 42,
-    drop_original: bool = True
+    drop_original: bool = True,
+    create_rfm_target: bool = True,  # New parameter to control RFM target creation
+    rfm_target_col: str = 'is_high_risk'  # New parameter for RFM target column name
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, List[str]]:
     """
     Preprocess the input data by applying feature engineering and transformations.
@@ -717,6 +725,27 @@ def preprocess_data(
     """
     # Make a copy of the input DataFrame
     df_processed = df.copy()
+    
+    # Create RFM-based target if requested and no target column is provided
+    if create_rfm_target and target_col is None and all(col in df_processed.columns for col in [customer_id_col, date_col, amount_col]):
+        logger.info("Creating RFM-based target variable...")
+        snapshot_date = df_processed[date_col].max() if date_col in df_processed.columns else None
+        
+        # Create RFM target
+        df_processed = create_proxy_target(
+            df=df_processed,
+            customer_id_col=customer_id_col,
+            date_col=date_col,
+            amount_col=amount_col,
+            snapshot_date=snapshot_date,
+            n_clusters=3,
+            random_state=random_state
+        )
+        
+        # Set the target column to the newly created RFM target
+        target_col = rfm_target_col
+        logger.info(f"Created RFM-based target '{target_col}'. Value counts:")
+        logger.info(df_processed[target_col].value_counts(normalize=True).to_string())
     
     # Ensure required columns exist
     required_cols = {
@@ -767,18 +796,43 @@ def preprocess_data(
         fraud_col=target_col  # Still use target for fraud-related features
     )
     
-    if target_col is not None:
-        # Split data before any transformation to avoid data leakage
+    # If target column exists, split the data
+    if target_col and target_col in df_processed.columns:
         from sklearn.model_selection import train_test_split
         
-        # Ensure we split by time (assuming data is already sorted by date)
-        train_size = 1 - test_size
-        split_idx = int(len(X) * train_size)
-        
-        X_train = X.iloc[:split_idx]
-        X_test = X.iloc[split_idx:]
-        y_train = y.iloc[:split_idx]
-        y_test = y.iloc[split_idx:]
+        # For RFM target, we need to ensure we have the same split for features and target
+        if target_col == rfm_target_col and create_rfm_target:
+            # Get the customer-level target
+            customer_targets = df_processed[[customer_id_col, target_col]].drop_duplicates()
+            
+            # Split customers into train and test
+            train_customers, test_customers = train_test_split(
+                customer_targets[customer_id_col].unique(),
+                test_size=test_size,
+                random_state=random_state,
+                stratify=customer_targets[target_col] if len(customer_targets[target_col].unique()) > 1 else None
+            )
+            
+            # Split the data based on customer IDs
+            train_mask = df_processed[customer_id_col].isin(train_customers)
+            test_mask = df_processed[customer_id_col].isin(test_customers)
+            
+            X = df_processed.drop(columns=[target_col] if drop_original and target_col in df_processed.columns else [])
+            y = df_processed[target_col]
+            
+            X_train, X_test = X[train_mask], X[test_mask]
+            y_train, y_test = y[train_mask], y[test_mask]
+        else:
+            # Original random split for non-RFM targets
+            X = df_processed.drop(columns=[target_col] if drop_original and target_col in df_processed.columns else [])
+            y = df_processed[target_col]
+            
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, 
+                test_size=test_size, 
+                random_state=random_state, 
+                stratify=y if len(y.unique()) > 1 else None
+            )
         
         # 1. First, fit and transform the features
         X_train_features = feature_pipeline.fit_transform(X_train)
