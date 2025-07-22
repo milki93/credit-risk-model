@@ -152,14 +152,13 @@ class CustomWOETransformer(BaseEstimator, TransformerMixin):
         return X_transformed.values if isinstance(X_transformed, pd.DataFrame) else X_transformed
 
 class XenteFeatures(BaseEstimator, TransformerMixin):
-    """
-    Compute customer behavior features for Xente dataset.
+    """Compute customer behavior features for Xente dataset.
     Includes RFM (Recency, Frequency, Monetary) and other behavioral features.
     """
     def __init__(self, 
-                 customer_id: str = 'AccountId',
+                 customer_id: str = 'CustomerId',
                  date_col: str = 'TransactionStartTime',
-                 amount_col: str = 'PurchaseValue',
+                 amount_col: str = 'Amount',
                  fraud_col: str = 'FraudResult'):
         self.customer_id = customer_id
         self.date_col = date_col
@@ -168,86 +167,158 @@ class XenteFeatures(BaseEstimator, TransformerMixin):
         self.reference_date = None
         self.customer_features_ = None
         self.feature_names_ = [
-            'recency_days', 'transaction_count', 'avg_amount',
-            'std_amount', 'total_amount', 'fraud_rate'
+            # RFM features
+            'recency_days', 'transaction_count', 'total_amount',
+            # Monetary features
+            'avg_amount', 'max_amount', 'min_amount', 'std_amount',
+            # Time-based features
+            'days_since_first_tx', 'avg_tx_per_day',
+            # Transaction patterns
+            'credit_ratio', 'debit_ratio', 'unique_days',
+            # Fraud-related
+            'fraud_rate', 'fraud_count'
         ]
         
     def fit(self, X: pd.DataFrame, y=None):
-        # Ensure datetime format
-        X = X.copy()
-        X[self.date_col] = pd.to_datetime(X[self.date_col])
-        
-        # Set reference date (latest transaction + 1 day)
+        """Fit the feature extractor on the training data."""
+        # Set reference date as the latest transaction date + 1 day
         self.reference_date = X[self.date_col].max() + pd.Timedelta(days=1)
         
-        # Calculate customer features
-        agg_funcs = {
+        # Calculate transaction type flags
+        X['is_credit'] = (X[self.amount_col] > 0).astype(int)
+        X['is_debit'] = (X[self.amount_col] < 0).astype(int)
+        
+        # Calculate first transaction date per customer
+        first_transactions = X.groupby(self.customer_id)[self.date_col].min().reset_index()
+        first_transactions.columns = [self.customer_id, 'first_transaction_date']
+        
+        # Calculate features per customer
+        customer_features = X.groupby(self.customer_id).agg({
             self.date_col: [
-                ('recency', lambda x: (self.reference_date - x.max()).days),
-                ('frequency', 'count')
+                ('recency_days', lambda x: (self.reference_date - x.max()).days),
+                ('transaction_count', 'count'),
+                ('unique_days', lambda x: x.dt.normalize().nunique())
             ],
             self.amount_col: [
-                ('avg_amount', 'mean'),
-                ('std_amount', 'std'),
                 ('total_amount', 'sum'),
-                ('count_nonzero', lambda x: (x > 0).sum())
+                ('avg_amount', 'mean'),
+                ('max_amount', 'max'),
+                ('min_amount', 'min'),
+                ('std_amount', 'std')
             ]
-        }
-        
-        # Add fraud rate if fraud column exists and is in X
-        if self.fraud_col and self.fraud_col in X.columns:
-            agg_funcs[self.fraud_col] = [('fraud_rate', 'mean')]
-        
-        # Group by customer and calculate features
-        customer_features = X.groupby(self.customer_id).agg(agg_funcs)
+        })
         
         # Flatten multi-index columns
-        customer_features.columns = ['_'.join(col).strip() for col in customer_features.columns.values]
+        customer_features.columns = [f"{col[1]}_{col[0]}" for col in customer_features.columns]
         
-        # Calculate additional features
-        customer_features['avg_days_between_transactions'] = \
-            customer_features[f'{self.date_col}_frequency'] / 30  # Approximate as 30 days
+        # Add credit/debit features if columns exist
+        if 'is_credit' in X.columns:
+            credit_features = X.groupby(self.customer_id)['is_credit'].agg([
+                ('credit_count', 'sum'),
+                ('credit_ratio', 'mean')
+            ])
+            customer_features = customer_features.join(credit_features)
             
-        customer_features['transaction_frequency'] = \
-            customer_features[f'{self.date_col}_frequency'] / 30  # Transactions per day
+        if 'is_debit' in X.columns:
+            debit_features = X.groupby(self.customer_id)['is_debit'].agg([
+                ('debit_count', 'sum'),
+                ('debit_ratio', 'mean')
+            ])
+            customer_features = customer_features.join(debit_features)
         
-        # Store the customer features for transformation
-        self.customer_features_ = customer_features
+        # Add first transaction date and calculate days since first transaction
+        customer_features = customer_features.join(first_transactions.set_index(self.customer_id))
+        customer_features['days_since_first_tx'] = (
+            self.reference_date - customer_features['first_transaction_date']
+        ).dt.days
         
-        # Update feature names
-        self.feature_names_ = customer_features.columns.tolist()
+        # Calculate average transactions per day
+        customer_features['avg_tx_per_day'] = (
+            customer_features['transaction_count_TransactionStartTime'] / 
+            (customer_features['days_since_first_tx'] + 1)  # Add 1 to avoid division by zero
+        )
         
-        self.customer_features_ = customer_features
+        # Calculate fraud-related features if fraud column exists
+        if self.fraud_col in X.columns:
+            fraud_stats = X.groupby(self.customer_id)[self.fraud_col].agg([
+                ('fraud_count', 'sum'),
+                ('fraud_rate', 'mean')
+            ])
+            customer_features = customer_features.join(fraud_stats)
         
+        # Keep only the features we want to return
+        self.customer_features_ = customer_features[[col for col in self.feature_names_ if col in customer_features.columns]]
         return self
     
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        # Ensure datetime format
-        X = X.copy()
-        X[self.date_col] = pd.to_datetime(X[self.date_col])
+        """Transform the input data by adding the computed features."""
+        # Create a copy to avoid modifying the original
+        X_transformed = X.copy()
+        
+        # Ensure date column is in datetime format
+        X_transformed[self.date_col] = pd.to_datetime(X_transformed[self.date_col])
+        
+        # Add is_credit and is_debit columns if they don't exist
+        if 'is_credit' not in X_transformed.columns:
+            X_transformed['is_credit'] = (X_transformed[self.amount_col] > 0).astype(int)
+        if 'is_debit' not in X_transformed.columns:
+            X_transformed['is_debit'] = (X_transformed[self.amount_col] < 0).astype(int)
         
         # If reference_date is not set, set it now
-        if self.reference_date is None:
-            self.reference_date = X[self.date_col].max() + pd.Timedelta(days=1)
+        if not hasattr(self, 'reference_date') or self.reference_date is None:
+            self.reference_date = X_transformed[self.date_col].max() + pd.Timedelta(days=1)
         
-        # If features are not calculated, calculate them
-        if self.customer_features_ is None:
-            self.fit(X)
+        # Calculate days since first transaction for new customers
+        if 'first_transaction_date_col' not in X_transformed.columns:
+            first_transactions = X_transformed.groupby(self.customer_id)[self.date_col].min().reset_index()
+            first_transactions.columns = [self.customer_id, 'first_transaction_date_col']
+            X_transformed = X_transformed.merge(
+                first_transactions,
+                on=self.customer_id,
+                how='left'
+            )
+            X_transformed['days_since_first_tx'] = (
+                self.reference_date - X_transformed['first_transaction_date_col']
+            ).dt.days
         
-        # Merge features back to the original dataframe
-        X_transformed = X.merge(
-            self.customer_features_,
-            left_on=self.customer_id,
-            right_index=True,
-            how='left'
-        )
+        # Merge with precomputed customer features if available
+        if hasattr(self, 'customer_features_') and self.customer_features_ is not None:
+            X_transformed = X_transformed.merge(
+                self.customer_features_, 
+                left_on=self.customer_id,
+                right_index=True,
+                how='left'
+            )
         
-        # Return only the engineered features
+        # Handle new customers (not seen during fit)
+        for col in self.feature_names_:
+            if col not in X_transformed.columns:
+                X_transformed[col] = np.nan
+                
+            # Fill NaN values with appropriate defaults
+            if col in ['recency_days', 'days_since_first_tx']:
+                X_transformed[col] = X_transformed[col].fillna(365)  # Assume new customer
+            elif col in ['transaction_count', 'total_amount', 'avg_amount', 'max_amount', 'min_amount', 
+                        'credit_count', 'debit_count', 'fraud_count']:
+                X_transformed[col] = X_transformed[col].fillna(0)
+            elif col in ['std_amount', 'avg_tx_per_day']:
+                X_transformed[col] = X_transformed[col].fillna(0)
+            elif col in ['credit_ratio', 'debit_ratio', 'fraud_rate']:
+                X_transformed[col] = X_transformed[col].fillna(0)
+            elif col == 'unique_days':
+                X_transformed[col] = X_transformed[col].fillna(1)  # At least 1 day
+        
+        # Ensure all expected features are present, even if they weren't in customer_features_
+        for col in self.feature_names_:
+            if col not in X_transformed.columns:
+                if col in ['recency_days', 'days_since_first_tx']:
+                    X_transformed[col] = 365
+                elif col in ['transaction_count', 'unique_days']:
+                    X_transformed[col] = 1
+                else:
+                    X_transformed[col] = 0
+        
         return X_transformed[self.feature_names_]
-    
-    def get_feature_names_out(self, input_features=None):
-        """Get output feature names for transformation"""
-        return np.array(self.feature_names_)
 
 class TimeFeatures(BaseEstimator, TransformerMixin):
     """
@@ -261,11 +332,8 @@ class TimeFeatures(BaseEstimator, TransformerMixin):
             'day_of_week_sin', 'day_of_week_cos',
             'day_of_month_sin', 'day_of_month_cos',
             'month_sin', 'month_cos',
-            'is_weekend', 'is_business_hours',
-            'is_night', 'is_morning_rush',
-            'is_evening_rush', 'season'
+            'is_weekend', 'is_night', 'is_business_hours'
         ]
-        
     def _cyclical_encoding(self, values: np.ndarray, period: int) -> tuple:
         """Encode cyclical features using sine and cosine transformation."""
         sin_values = np.sin(2 * np.pi * values / period)

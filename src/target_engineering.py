@@ -1,223 +1,202 @@
 """
-Target Engineering Module
-
-This module implements the creation of a proxy target variable for credit risk
-using RFM (Recency, Frequency, Monetary) analysis and K-Means clustering.
+Module for creating proxy target variables for credit risk modeling.
 """
-
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from sklearn.pipeline import Pipeline
-from datetime import datetime
-import logging
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from sklearn.preprocessing import StandardScaler
+from typing import Tuple, Optional
 
 class RFMTargetEngineer:
-    """Engineer a proxy target variable using RFM analysis and clustering."""
+    """
+    Engineer target variables using RFM (Recency, Frequency, Monetary) analysis
+    and clustering to create proxy labels for credit risk.
+    """
     
-    def __init__(self, snapshot_date=None, n_clusters=3, random_state=42):
-        """Initialize the RFM target engineer.
+    def __init__(self, 
+                 n_clusters: int = 3,
+                 recency_weight: float = 0.4,
+                 frequency_weight: float = 0.3,
+                 monetary_weight: float = 0.3):
+        """
+        Initialize the RFM target engineer.
         
         Args:
-            snapshot_date (str or datetime, optional): Reference date for RFM calculation.
-                If None, uses max date in the data. Defaults to None.
-            n_clusters (int, optional): Number of clusters for K-Means. Defaults to 3.
-            random_state (int, optional): Random state for reproducibility. Defaults to 42.
+            n_clusters: Number of clusters for K-means
+            recency_weight: Weight for recency in RFM score
+            frequency_weight: Weight for frequency in RFM score
+            monetary_weight: Weight for monetary value in RFM score
         """
-        self.snapshot_date = pd.to_datetime(snapshot_date) if snapshot_date else None
         self.n_clusters = n_clusters
-        self.random_state = random_state
+        self.recency_weight = recency_weight
+        self.frequency_weight = frequency_weight
+        self.monetary_weight = monetary_weight
         self.scaler = StandardScaler()
-        self.kmeans = KMeans(
-            n_clusters=n_clusters, 
-            random_state=random_state,
-            n_init=10  # Explicitly set n_init to avoid warning
-        )
-        self.pipeline = Pipeline([
-            ('scaler', self.scaler),
-            ('kmeans', self.kmeans)
-        ])
-        self.rfm_scores_ = None
-        self.cluster_centers_ = None
+        self.kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        self.feature_columns = ['recency', 'frequency', 'monetary']
     
-    def calculate_rfm(self, df, customer_id_col='CustomerId', 
-                     date_col='TransactionStartTime', amount_col='Amount'):
-        """Calculate RFM metrics for each customer.
+    def calculate_rfm(self, 
+                     df: pd.DataFrame,
+                     customer_id: str,
+                     date_col: str,
+                     amount_col: str,
+                     reference_date: Optional[pd.Timestamp] = None) -> pd.DataFrame:
+        """
+        Calculate RFM metrics for each customer.
         
         Args:
-            df (pd.DataFrame): Input transaction data
-            customer_id_col (str): Name of customer ID column
-            date_col (str): Name of transaction date column
-            amount_col (str): Name of transaction amount column
-            
+            df: DataFrame containing transaction data
+            customer_id: Name of customer ID column
+            date_col: Name of transaction date column
+            amount_col: Name of transaction amount column
+            reference_date: Reference date for recency calculation. 
+                          If None, uses max date in data + 1 day
+                          
         Returns:
-            pd.DataFrame: RFM scores for each customer
+            DataFrame with RFM metrics per customer
         """
-        logger.info("Calculating RFM metrics...")
+        # Make a copy to avoid modifying the original
+        df = df.copy()
         
-        # Convert to datetime if not already
-        df[date_col] = pd.to_datetime(df[date_col])
+        # Convert date column to datetime if needed
+        if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df[date_col] = pd.to_datetime(df[date_col])
         
-        # Set snapshot date if not provided
-        if self.snapshot_date is None:
-            self.snapshot_date = df[date_col].max()
+        # Set reference date if not provided
+        if reference_date is None:
+            reference_date = df[date_col].max() + pd.Timedelta(days=1)
         
         # Calculate RFM metrics
-        rfm = df.groupby(customer_id_col).agg({
-            date_col: lambda x: (self.snapshot_date - x.max()).days,  # Recency
-            customer_id_col: 'count',  # Frequency
-            amount_col: 'sum'  # Monetary
+        rfm = df.groupby(customer_id).agg({
+            date_col: lambda x: (reference_date - x.max()).days,  # Recency
+            customer_id: 'count',                                # Frequency
+            amount_col: 'sum'                                    # Monetary
         }).rename(columns={
             date_col: 'recency',
-            customer_id_col: 'frequency',
+            customer_id: 'frequency',
             amount_col: 'monetary'
         })
         
-        # Store RFM scores
-        self.rfm_scores_ = rfm
+        # Calculate RFM score (lower is better for recency, higher better for others)
+        rfm['recency_score'] = pd.qcut(rfm['recency'], q=5, labels=[5, 4, 3, 2, 1], duplicates='drop')
+        rfm['frequency_score'] = pd.qcut(rfm['frequency'].rank(method='first'), q=5, labels=[1, 2, 3, 4, 5], duplicates='drop')
+        rfm['monetary_score'] = pd.qcut(rfm['monetary'].rank(method='first'), q=5, labels=[1, 2, 3, 4, 5], duplicates='drop')
+        
+        # Calculate weighted RFM score
+        rfm['rfm_score'] = (
+            rfm['recency_score'].astype(float) * self.recency_weight +
+            rfm['frequency_score'].astype(float) * self.frequency_weight +
+            rfm['monetary_score'].astype(float) * self.monetary_weight
+        )
+        
         return rfm
     
-    def calculate_rfm_scores(self, rfm_scores):
-        """Calculate RFM scores (1-5 scale) based on quintiles."""
-        # Reverse recency (higher is better)
-        rfm_scores['recency_score'] = pd.qcut(
-            rfm_scores['recency'], 
-            q=5, 
-            labels=[5, 4, 3, 2, 1]
-        ).astype(int)
-        
-        # Higher frequency is better
-        rfm_scores['frequency_score'] = pd.qcut(
-            rfm_scores['frequency'].rank(method='first'),
-            q=5,
-            labels=[1, 2, 3, 4, 5]
-        ).astype(int)
-        
-        # Higher monetary is better
-        rfm_scores['monetary_score'] = pd.qcut(
-            rfm_scores['monetary'],
-            q=5,
-            labels=[1, 2, 3, 4, 5]
-        ).astype(int)
-        
-        return rfm_scores
-    
-    def fit(self, df, customer_id_col='CustomerId', 
-           date_col='TransactionStartTime', amount_col='Amount'):
-        """Fit the RFM model and identify high-risk customers.
+    def fit(self, 
+           df: pd.DataFrame,
+           customer_id: str = 'CustomerId',
+           date_col: str = 'TransactionStartTime',
+           amount_col: str = 'Amount') -> 'RFMTargetEngineer':
+        """
+        Fit the RFM model and cluster customers.
         
         Args:
-            df (pd.DataFrame): Input transaction data
-            customer_id_col (str): Name of customer ID column
-            date_col (str): Name of transaction date column
-            amount_col (str): Name of transaction amount column
+            df: DataFrame containing transaction data
+            customer_id: Name of customer ID column
+            date_col: Name of transaction date column
+            amount_col: Name of transaction amount column
             
         Returns:
-            self: Returns the instance itself
+            Fitted RFMTargetEngineer instance
         """
         # Calculate RFM metrics
-        rfm_scores = self.calculate_rfm(df, customer_id_col, date_col, amount_col)
+        self.rfm_ = self.calculate_rfm(df, customer_id, date_col, amount_col)
         
-        # Scale the features
-        X = rfm_scores[['recency', 'frequency', 'monetary']]
+        # Scale the RFM features
+        self.scaler.fit(self.rfm_[self.feature_columns])
         
-        # Fit the pipeline (scaling + clustering)
-        self.pipeline.fit(X)
+        # Fit K-means on scaled features
+        scaled_features = self.scaler.transform(self.rfm_[self.feature_columns])
+        self.kmeans.fit(scaled_features)
         
-        # Get cluster assignments
-        rfm_scores['cluster'] = self.pipeline.predict(X)
+        # Add cluster labels to RFM data
+        self.rfm_['cluster'] = self.kmeans.labels_
         
-        # Calculate cluster centers in the original feature space
-        self.cluster_centers_ = self.scaler.inverse_transform(
-            self.kmeans.cluster_centers_
-        )
-        
-        # Identify the high-risk cluster (highest recency, lowest frequency and monetary)
-        # We calculate a composite score where higher is riskier
-        cluster_risk_scores = (
-            self.cluster_centers_[:, 0] -  # Higher recency is riskier
-            self.cluster_centers_[:, 1] -  # Lower frequency is riskier
-            self.cluster_centers_[:, 2]    # Lower monetary is riskier
-        )
-        
-        self.high_risk_cluster_ = np.argmax(cluster_risk_scores)
-        logger.info(f"Identified high-risk cluster: {self.high_risk_cluster_}")
+        # Sort clusters by risk (lower RFM score = higher risk)
+        cluster_means = self.rfm_.groupby('cluster')['rfm_score'].mean().sort_values()
+        self.risk_rank_ = {old: new for new, old in enumerate(cluster_means.index)}
+        self.rfm_['risk_rank'] = self.rfm_['cluster'].map(self.risk_rank_)
         
         return self
     
-    def transform(self, df, customer_id_col='CustomerId'):
-        """Add is_high_risk column to the input DataFrame.
+    def transform(self, 
+                 df: pd.DataFrame,
+                 customer_id: str = 'CustomerId',
+                 date_col: str = 'TransactionStartTime',
+                 amount_col: str = 'Amount') -> pd.DataFrame:
+        """
+        Transform the input data by adding RFM features and risk labels.
         
         Args:
-            df (pd.DataFrame): Input transaction data
-            customer_id_col (str): Name of customer ID column
+            df: DataFrame containing transaction data
+            customer_id: Name of customer ID column
+            date_col: Name of transaction date column
+            amount_col: Name of transaction amount column
             
         Returns:
-            pd.DataFrame: Original DataFrame with added 'is_high_risk' column
+            Original DataFrame with added RFM features and risk labels
         """
-        if self.rfm_scores_ is None:
-            raise ValueError("Model has not been fitted. Call fit() first.")
+        # Calculate RFM metrics for the new data
+        rfm_new = self.calculate_rfm(df, customer_id, date_col, amount_col)
         
-        # Create a mapping from customer ID to high-risk status
-        risk_mapping = (self.rfm_scores_['cluster'] == self.high_risk_cluster_).astype(int)
-        risk_mapping = risk_mapping.rename('is_high_risk')
+        # Scale features and predict clusters
+        scaled_features = self.scaler.transform(rfm_new[self.feature_columns])
+        rfm_new['cluster'] = self.kmeans.predict(scaled_features)
+        rfm_new['risk_rank'] = rfm_new['cluster'].map(self.risk_rank_)
         
         # Merge with original data
-        result_df = df.merge(
-            risk_mapping,
-            left_on=customer_id_col,
+        result = df.merge(
+            rfm_new[['risk_rank', 'rfm_score']],
+            left_on=customer_id,
             right_index=True,
             how='left'
         )
         
-        # Fill any missing values with 0 (not high risk)
-        result_df['is_high_risk'] = result_df['is_high_risk'].fillna(0).astype(int)
-        
-        logger.info(f"High-risk customers: {result_df['is_high_risk'].sum():,} "
-                   f"({result_df['is_high_risk'].mean():.1%} of total)")
-        
-        return result_df
-    
-    def fit_transform(self, df, customer_id_col='CustomerId', 
-                     date_col='TransactionStartTime', amount_col='Amount'):
-        """Fit the model and transform the data in one step."""
-        self.fit(df, customer_id_col, date_col, amount_col)
-        return self.transform(df, customer_id_col)
+        return result
 
-def create_proxy_target(df, customer_id_col='CustomerId',
-                       date_col='TransactionStartTime', 
-                       amount_col='Amount',
-                       snapshot_date=None,
-                       n_clusters=3,
-                       random_state=42):
-    """Convenience function to create proxy target variable.
+def create_proxy_target(df: pd.DataFrame,
+                       customer_id: str = 'CustomerId',
+                       date_col: str = 'TransactionStartTime',
+                       amount_col: str = 'Amount',
+                       n_clusters: int = 3,
+                       risk_threshold: float = 0.8) -> Tuple[pd.DataFrame, 'RFMTargetEngineer']:
+    """
+    Create a proxy target variable for credit risk using RFM analysis.
     
     Args:
-        df (pd.DataFrame): Input transaction data
-        customer_id_col (str): Name of customer ID column
-        date_col (str): Name of transaction date column
-        amount_col (str): Name of transaction amount column
-        snapshot_date (str or datetime, optional): Reference date for RFM calculation
-        n_clusters (int, optional): Number of clusters for K-Means
-        random_state (int, optional): Random state for reproducibility
+        df: DataFrame containing transaction data
+        customer_id: Name of customer ID column
+        date_col: Name of transaction date column
+        amount_col: Name of transaction amount column
+        n_clusters: Number of clusters for risk segmentation
+        risk_threshold: Percentile threshold for high-risk classification (0-1)
         
     Returns:
-        pd.DataFrame: Original DataFrame with added 'is_high_risk' column
+        Tuple of (DataFrame with added target column, fitted RFMTargetEngineer)
     """
-    engineer = RFMTargetEngineer(
-        snapshot_date=snapshot_date,
-        n_clusters=n_clusters,
-        random_state=random_state
-    )
+    # Initialize and fit the RFM target engineer
+    rfm_engineer = RFMTargetEngineer(n_clusters=n_clusters)
+    rfm_engineer.fit(df, customer_id, date_col, amount_col)
     
-    return engineer.fit_transform(
-        df, 
-        customer_id_col=customer_id_col,
-        date_col=date_col,
-        amount_col=amount_col
-    )
+    # Transform the data to get risk ranks
+    df_with_risk = rfm_engineer.transform(df, customer_id, date_col, amount_col)
+    
+    # Create binary target based on risk threshold
+    threshold = df_with_risk['risk_rank'].quantile(risk_threshold)
+    df_with_risk['is_high_risk'] = (df_with_risk['risk_rank'] >= threshold).astype(int)
+    
+    # Add RFM score as a feature
+    df_with_risk['rfm_score'] = rfm_engineer.rfm_.loc[
+        df_with_risk[customer_id], 'rfm_score'
+    ].values
+    
+    return df_with_risk, rfm_engineer

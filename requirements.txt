@@ -1,27 +1,55 @@
 # Core requirements
-pandas>=1.3.0
+pandas>=1.5.0
 numpy>=1.21.0
-scikit-learn>=1.0.0
+scikit-learn>=1.2.0
 python-dateutil>=2.8.2
-pytz>=2021.1
+pytz>=2022.1
 
 # Feature engineering
-xverse>=0.2.3
+xverse>=0.3.0
+
+# Model training and evaluation
+xgboost>=1.7.0
+lightgbm>=3.3.0
+catboost>=1.0.0
+imbalanced-learn>=0.10.0
+
+# Model tracking and experiment management
+mlflow>=2.0.0
+joblib>=1.2.0
+
+# Data visualization
+matplotlib>=3.6.0
+seaborn>=0.12.0
+plotly>=5.11.0
 
 # Testing
-pytest>=7.0.0
-pytest-cov>=3.0.0
+pytest>=7.2.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
 
-# Development
+# Development and documentation
 jupyter>=1.0.0
-matplotlib>=3.4.0
-seaborn>=0.11.0
-
-# API (if needed)
-fastapi>=0.68.0
-uvicorn>=0.15.0
-pydantic>=1.8.0
+jupyterlab>=3.5.0
+ipykernel>=6.0.0
+black>=22.12.0
+isort>=5.10.1
+flake8>=5.0.0
+mypy>=0.991
 
 # Utilities
-tqdm>=4.62.0
-python-dotenv>=0.19.0
+tqdm>=4.65.0
+python-dotenv>=0.21.0
+pyyaml>=6.0
+
+# Optional: For advanced visualization in notebooks
+ipywidgets>=8.0.0
+
+# Optional: For model interpretation
+shap>=0.41.0
+lime>=0.2.0.1
+
+# Optional: For API deployment (if needed)
+fastapi>=0.95.0
+uvicorn>=0.21.0
+pydantic>=1.10.5
