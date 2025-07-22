@@ -380,8 +380,17 @@ class DataProcessor:
             columns=[col for col in columns_to_drop if col in self.processed_data.columns]
         )
         
-        # Fill any remaining NaN values
-        self.processed_data = self.processed_data.fillna(0)
+        # Fill NaN values based on column type
+        for col in self.processed_data.columns:
+            if pd.api.types.is_categorical_dtype(self.processed_data[col]):
+                # For categorical columns, fill with the mode
+                if not self.processed_data[col].empty and self.processed_data[col].isna().any():
+                    mode_val = self.processed_data[col].mode()
+                    if not mode_val.empty:
+                        self.processed_data[col] = self.processed_data[col].fillna(mode_val[0])
+            else:
+                # For numeric columns, fill with 0
+                self.processed_data[col] = self.processed_data[col].fillna(0)
         
         logger.info(f"Processed dataset shape: {self.processed_data.shape}")
         return self.processed_data
