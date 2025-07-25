@@ -26,13 +26,13 @@ def create_feature_pipeline(
     # Numeric transformations
     numeric_transformer = Pipeline(steps=[
         ('imputer', SimpleImputer(strategy='median')),
-        ('scaler', StandardScaler())
+        ('scaler', StandardScaler(with_mean=False))
     ])
     
     # Categorical transformations
     categorical_transformer = Pipeline(steps=[
         ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
-        ('onehot', OneHotEncoder(handle_unknown='ignore'))
+        ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
     ])
     
     # Combine preprocessing steps
