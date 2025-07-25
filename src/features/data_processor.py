@@ -21,6 +21,35 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DataProcessor:
+    def process_data(self, input_file: Optional[str] = None, sample_size: int = None) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Load, clean, and process data end-to-end. Optionally sample rows for fast testing.
+        Args:
+            input_file: Path to a specific data file (optional)
+            sample_size: Number of rows to sample from data (optional)
+        Returns:
+            processed_data: Final feature-engineered DataFrame
+            metadata: Dict with metadata (e.g., num_samples)
+        """
+        if input_file and os.path.exists(input_file):
+            logger.info(f"Loading data from {input_file}")
+            df = pd.read_csv(input_file)
+        else:
+            df = self.load_data(sample_size=sample_size)
+        self.data = df
+        # Ensure TransactionStartTime is datetime
+        if not pd.api.types.is_datetime64_any_dtype(self.data['TransactionStartTime']):
+            self.data['TransactionStartTime'] = pd.to_datetime(self.data['TransactionStartTime'], utc=True)
+        self.data['TransactionStartTime'] = self.data['TransactionStartTime'].dt.tz_localize(None)
+        # Ensure snapshot_date is set for RFM calculation
+        if self.snapshot_date is None:
+            self.snapshot_date = self.data['TransactionStartTime'].max() + timedelta(days=1)
+            logger.info(f"Using snapshot date: {self.snapshot_date}")
+        self.clean_data()
+        processed_data = self.process_features()
+        metadata = {"num_samples": len(processed_data)}
+        return processed_data, metadata
+
     """
     Class for processing raw transaction data into features for credit risk modeling.
     """
@@ -59,7 +88,7 @@ class DataProcessor:
             ('onehot', OneHotEncoder(handle_unknown='ignore'))
         ])
     
-    def load_data(self) -> pd.DataFrame:
+    def load_data(self, sample_size: int = None) -> pd.DataFrame:
         """
         Load and preprocess the raw transaction data.
         
@@ -97,6 +126,8 @@ class DataProcessor:
                 parse_dates=date_columns,
                 infer_datetime_format=True
             )
+            if sample_size is not None and sample_size < len(self.data):
+                self.data = self.data.sample(n=sample_size, random_state=42)
             
             # Set snapshot date to max date + 1 day if not provided
             if self.snapshot_date is None:
@@ -129,10 +160,14 @@ class DataProcessor:
         df['Amount'] = df['Amount'].fillna(0)
         df['Value'] = df['Value'].fillna(0)
         
-        # Ensure Value is always positive (absolute of Amount)
-        df['Value'] = df['Value'].abs()
+        # Convert transaction time to datetime with UTC timezone handling
+        if not pd.api.types.is_datetime64_any_dtype(df['TransactionStartTime']):
+            df['TransactionStartTime'] = pd.to_datetime(df['TransactionStartTime'], utc=True)
         
-        # Add transaction month and year
+        # Ensure timezone-naive datetime (remove timezone info)
+        df['TransactionStartTime'] = df['TransactionStartTime'].dt.tz_localize(None)
+        
+        # Add time-based features
         df['TransactionMonth'] = df['TransactionStartTime'].dt.to_period('M')
         df['TransactionYear'] = df['TransactionStartTime'].dt.year
         
@@ -380,8 +415,17 @@ class DataProcessor:
             columns=[col for col in columns_to_drop if col in self.processed_data.columns]
         )
         
-        # Fill any remaining NaN values
-        self.processed_data = self.processed_data.fillna(0)
+        # Fill NaN values based on column type
+        for col in self.processed_data.columns:
+            if pd.api.types.is_categorical_dtype(self.processed_data[col]):
+                # For categorical columns, fill with the mode
+                if not self.processed_data[col].empty and self.processed_data[col].isna().any():
+                    mode_val = self.processed_data[col].mode()
+                    if not mode_val.empty:
+                        self.processed_data[col] = self.processed_data[col].fillna(mode_val[0])
+            else:
+                # For numeric columns, fill with 0
+                self.processed_data[col] = self.processed_data[col].fillna(0)
         
         logger.info(f"Processed dataset shape: {self.processed_data.shape}")
         return self.processed_data

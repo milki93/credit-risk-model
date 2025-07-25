@@ -78,6 +78,7 @@ class ModelTrainer:
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
         self.logger = logging.getLogger(__name__)
+        self.metrics = {}
         
         # Define models and their parameter grids
         self.models = {
@@ -854,7 +855,7 @@ class ModelTrainer:
             top_n: Number of top features to display
             figsize: Figure size
         """
-        if self.feature_importances_ is None:
+        if not hasattr(self, 'feature_importances_') or self.feature_importances_ is None:
             logger.warning("No feature importances available for the current model.")
             return
             
@@ -1086,7 +1087,7 @@ class ModelTrainer:
             'model_name': self.best_model_name,
             'training_date': timestamp,
             'metrics': self.metrics,
-            'feature_importances': self.feature_importances_.to_dict() if self.feature_importances_ is not None else None,
+            'feature_importances': self.feature_importances_.to_dict() if hasattr(self, 'feature_importances_') and self.feature_importances_ is not None else None,
             'model_type': type(self.best_model).__name__
         }
         

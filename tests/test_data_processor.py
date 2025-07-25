@@ -17,7 +17,7 @@ SAMPLE_DATA = {
     'BatchId': [f'B{i//10}' for i in range(1, 101)],
     'AccountId': [f'A{i//5}' for i in range(1, 101)],
     'SubscriptionId': [f'S{i//10}' for i in range(1, 101)],
-    'CustomerId': [f'C{i//10}' for i in range(1, 101)],
+    'CustomerId': [f'C{i%10}' for i in range(100)],  # 10 unique customers (C0-C9)
     'CurrencyCode': ['UGX'] * 100,
     'CountryCode': ['256'] * 100,
     'ProviderId': [f'P{i%5+1}' for i in range(100)],
@@ -89,14 +89,31 @@ def test_calculate_rfm(sample_data_path):
 def test_calculate_behavioral_features(sample_data_path):
     """Test behavioral feature calculation."""
     processor = DataProcessor(data_path=sample_data_path)
+    # First clean the data to ensure required columns are created
     processor.load_data()
+    cleaned_data = processor.clean_data()
+    
+    # Verify required columns are created in clean_data
+    required_columns = ['AmountCategory', 'DayOfWeek', 'HourOfDay']
+    for col in required_columns:
+        assert col in cleaned_data.columns, f"Required column {col} not found in cleaned data"
+    
+    # Now calculate behavioral features
     features = processor.calculate_behavioral_features()
     
-    assert 'TotalTransactions' in features.columns
-    assert 'TotalSpend' in features.columns
-    assert 'UniqueProductCategories' in features.columns
-    assert 'TransactionFrequency' in features.columns
-    assert 'CustomerLifetime' in features.columns
+    # Verify the output features
+    expected_columns = [
+        'CustomerId', 'TotalTransactions', 'TotalSpend', 'AvgTransactionValue',
+        'StdTransactionValue', 'MinTransactionValue', 'MaxTransactionValue',
+        'UniqueTransactionDays', 'UniqueProductCategories', 'UniqueProviders',
+        'UniqueChannels', 'MostActiveDay', 'MostActiveHour',
+        'MostCommonAmountCategory', 'TransactionFrequency', 'CustomerLifetime',
+        'AvgDaysBetweenTransactions', 'DaysSinceFirstTransactionDate',
+        'DaysSinceLastTransactionDate'
+    ]
+    
+    for col in expected_columns:
+        assert col in features.columns, f"Expected column {col} not found in behavioral features"
 
 def test_create_target_variable(sample_data_path):
     """Test target variable creation."""

@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.models.train import ModelTrainer
-from src.data_processing import DataProcessor
+from src.features.data_processor import DataProcessor
 
 def parse_args():
     """Parse command line arguments."""
@@ -37,9 +37,11 @@ def parse_args():
                        help='Number of cross-validation folds')
     parser.add_argument('--scoring', type=str, default='roc_auc',
                        help='Scoring metric for model selection')
+    parser.add_argument('--sample-size', type=int, default=None,
+                       help='Number of rows to sample from data for testing (default: all)')
     return parser.parse_args()
 
-def load_and_process_data(data_dir: str, test_size: float = 0.2, random_state: int = 42) -> tuple:
+def load_and_process_data(data_dir: str, test_size: float = 0.2, random_state: int = 42, sample_size: int = None) -> tuple:
     """
     Load and preprocess the dataset for training.
     
@@ -47,6 +49,7 @@ def load_and_process_data(data_dir: str, test_size: float = 0.2, random_state: i
         data_dir: Directory containing the raw data files
         test_size: Proportion of data to use for testing
         random_state: Random seed for reproducibility
+        sample_size: Number of rows to sample from data for testing (default: all)
         
     Returns:
         Tuple of (X_train, X_test, y_train, y_test, feature_names, metadata)
@@ -57,14 +60,16 @@ def load_and_process_data(data_dir: str, test_size: float = 0.2, random_state: i
     processor = DataProcessor()
     
     # Load and process data
-    data, metadata = processor.process_data()
+    data_file = os.path.join(data_dir, 'transactions.csv')
+    data, metadata = processor.process_data(input_file=data_file, sample_size=sample_size)
     
     # Check if target variable exists
     if 'is_high_risk' not in data.columns:
         raise ValueError("Target variable 'is_high_risk' not found in the processed data.")
     
-    # Split into features and target
-    X = data.drop(columns=['is_high_risk'])
+    # Drop identifier columns from features
+    ID_COLS = ['TransactionId', 'BatchId', 'AccountId', 'SubscriptionId', 'CustomerId']
+    X = data.drop(columns=['is_high_risk'] + ID_COLS, errors='ignore')
     y = data['is_high_risk']
     
     # Split into train and test sets
@@ -74,14 +79,24 @@ def load_and_process_data(data_dir: str, test_size: float = 0.2, random_state: i
         random_state=random_state,
         stratify=y  # Maintain class distribution in splits
     )
-    
-    print(f"Training set: {len(X_train):,} samples ({y_train.mean():.2%} positive)")
-    print(f"Test set: {len(X_test):,} samples ({y_test.mean():.2%} positive)")
+
+    # Apply feature engineering pipeline: encode categoricals, scale numerics
+    from src.features.feature_engineering import create_feature_pipeline
+    categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    numeric_cols = X.select_dtypes(include=['number']).columns.tolist()
+    feature_pipeline = create_feature_pipeline(numeric_cols, categorical_cols)
+    X_train = feature_pipeline.fit_transform(X_train)
+    X_test = feature_pipeline.transform(X_test)
+
+    print(f"Training set: {X_train.shape[0]:,} samples ({y_train.mean():.2%} positive)")
+    print(f"Test set: {X_test.shape[0]:,} samples ({y_test.mean():.2%} positive)")
     print(f"Number of features: {X_train.shape[1]}")
-    
-    return X_train, X_test, y_train, y_test, X.columns.tolist(), metadata
+
+    return X_train, X_test, y_train, y_test, numeric_cols + categorical_cols, metadata
 
 def main():
+    import mlflow
+    mlflow.end_run()
     """Main function to run the training pipeline."""
     # Parse command line arguments
     args = parse_args()
@@ -98,13 +113,13 @@ def main():
     X_train, X_test, y_train, y_test, feature_names, metadata = load_and_process_data(
         args.data_dir, 
         test_size=args.test_size,
-        random_state=args.random_state
+        random_state=args.random_state,
+        sample_size=args.sample_size
     )
     
     # Initialize model trainer
     trainer = ModelTrainer(
         experiment_name=experiment_name,
-        tracking_uri="file:./mlruns",
         random_state=args.random_state
     )
     
@@ -131,6 +146,7 @@ def main():
     model_path = trainer.save_model(args.output_dir)
     
     # Log metadata and feature names
+    mlflow.end_run()
     with mlflow.start_run():
         mlflow.log_params({
             'n_features': len(feature_names),
