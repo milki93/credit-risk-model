@@ -1,0 +1,7 @@
+{
+  "model_name": "gradient_boosting",
+  "training_date": "20250725_210053",
+  "metrics": {},
+  "feature_importances": null,
+  "model_type": "Pipeline"
+}
